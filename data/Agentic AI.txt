@@ -1,0 +1,83 @@
+Agentic AI Systems
+
+Overview
+Agentic AI refers to AI systems that can autonomously pursue goals, make decisions, use tools, plan multi-step actions, and adapt based on feedback. Unlike traditional AI systems that respond to a single prompt, agentic systems can reason about objectives and execute workflows with minimal human intervention.
+
+Core Characteristics
+1. Goal-Oriented Behavior
+   - Operate toward a defined objective.
+   - Break large goals into smaller tasks.
+
+2. Planning
+   - Create step-by-step plans.
+   - Revise plans when circumstances change.
+
+3. Tool Use
+   - Interact with APIs, databases, search engines, code interpreters, and external software.
+
+4. Memory
+   - Maintain short-term and long-term context.
+   - Learn from previous interactions and outcomes.
+
+5. Reasoning
+   - Evaluate options and select appropriate actions.
+   - Handle uncertainty and constraints.
+
+6. Autonomy
+   - Execute multiple actions without requiring constant user input.
+
+Architecture of an Agentic AI System
+- User Goal
+- Planner
+- Reasoning Engine
+- Memory Layer
+- Tool Layer
+- Execution Layer
+- Feedback and Monitoring
+
+Common Components
+- Large Language Model (LLM)
+- Vector Database
+- Retrieval-Augmented Generation (RAG)
+- Workflow Orchestrator
+- Observability and Monitoring Tools
+- Guardrails and Safety Controls
+
+Examples
+- Autonomous research assistants
+- Customer support agents
+- Coding assistants
+- Business process automation agents
+- Personal productivity agents
+
+Popular Frameworks
+- LangChain
+- LangGraph
+- AutoGen
+- CrewAI
+- LlamaIndex
+- Semantic Kernel
+
+Agent Patterns
+1. ReAct (Reason + Act)
+2. Planner-Executor
+3. Multi-Agent Systems
+4. Reflection and Self-Critique
+5. Human-in-the-Loop
+
+Challenges
+- Hallucinations
+- Tool reliability
+- Security risks
+- Cost and latency
+- Evaluation and monitoring
+
+Future Trends
+- More capable multi-agent collaboration
+- Persistent memory systems
+- Enterprise AI coworkers
+- Autonomous workflow automation
+- Improved reasoning and planning capabilities
+
+Summary
+Agentic AI systems extend traditional LLMs by combining reasoning, planning, memory, and tool usage to achieve goals autonomously. They form the foundation of next-generation AI assistants and enterprise automation platforms.

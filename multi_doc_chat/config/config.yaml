@@ -1,0 +1,45 @@
+app:
+  name: LLMOps
+  environment: development
+
+embedding_model:
+  provider: huggingface
+  model_name: sentence-transformers/all-MiniLM-L6-v2
+
+# embedding_model:
+#   provider: google
+#   model_name: text-embedding-004
+
+retriever:
+  top_k: 10
+  search_type: "mmr"
+  fetch_k: 20
+  lambda_mult: 0.5
+
+chunking:
+  chunk_size: 200
+  chunk_overlap: 20
+
+vectorstore:
+  provider: faiss
+
+llm:
+  active: ollama
+
+  ollama:
+    provider: ollama
+    model_name: llama3
+    temperature: 0.1
+
+  gemini:
+    provider: google
+    model_name: gemini-2.5-flash
+    temperature: 0
+
+  groq:
+    provider: groq
+    model_name: llama-3.3-70b-versatile
+    temperature: 0
+
+logging:
+  level: INFO
