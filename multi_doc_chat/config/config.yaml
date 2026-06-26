@@ -16,6 +16,21 @@ retriever:
   fetch_k: 20
   lambda_mult: 0.5
 
+#------------------------------------------------------
+retrieval:
+  mode: "mmr"  # "similarity" | "mmr" | "pageindex" | "hybrid"
+  top_k: 5
+
+pageindex:
+  enabled: true
+  api_key: "env:PAGEINDEX_API_KEY"
+  base_url: "https://api.pageindex.ai"
+  # how you map sessions to PageIndex doc_ids
+  doc_namespace: "session"
+
+#------------------------------------------------------
+
+
 chunking:
   chunk_size: 200
   chunk_overlap: 20

@@ -15,6 +15,11 @@ from multi_doc_chat.utils.model_loader import ModelLoader
 from multi_doc_chat.utils.document_ops import load_documents
 from datetime import datetime
 
+from multi_doc_chat.src.document_chat.pageindex_retriever import (
+    get_pageindex_client,
+    submit_document,
+)
+from multi_doc_chat.utils.session_store import add_pageindex_doc, get_pageindex_docs
 
 log = CustomLogger().get_logger(__name__)
 
@@ -56,40 +61,175 @@ class ChatIngestor:
     log.info("Documents split", chunks=len(chunks), chunk_size=chunk_size, overlap=chunk_overlap)
     return chunks
   
-  def built_retriever(self, uploaded_files: Iterable,*, chunk_size: int = 1000, chunk_overlap: int = 200, k: int = 5, search_type:str = "mmr", fetch_k:int = 20, lambda_mult:float = 0.5):
-    try:
-      paths = save_uploaded_files(uploaded_files, self.temp_dir)
-      docs = load_documents(paths)
-      if not docs:
-        raise ValueError("No valid documents loaded.")
-      chunks = self._split(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
-      #FAISS Manager (very important class for docchat)
-      fm = FaissManager(self.faiss_dir, self.model_loader)
-      texts = [c.page_content for c in chunks]
-      metas = [c.metadata for c in chunks]
+  def built_retriever(
+        self,
+        uploaded_files: Iterable,
+        *,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 200,
+        k: int = 5,
+        search_type: str = "mmr",          # "similarity" | "mmr" | "pageindex"
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+    ):
+        """
+        Prepare retrieval backend for this session.
 
-      try:
-        vs = fm.load_or_create(texts=texts, metadatas=metas)
-      except Exception as e:
-        vs = fm.load_or_create(texts=texts, metadatas=metas)
+        - For "similarity" / "mmr":
+            * Ingest docs into FAISS
+            * Return a LangChain retriever (existing behavior)
+
+        - For "pageindex":
+            * Save files
+            * Upload PDFs to PageIndex
+            * Store doc_ids for this session
+            * Return a descriptor with backend + doc_ids (no FAISS retriever)
+        """
+        try:
+            # 1. Save uploaded files to session directory
+            paths = save_uploaded_files(uploaded_files, self.temp_dir)
+
+            # Branch by search_type
+            if search_type in ("similarity", "mmr"):
+                # ----- Existing FAISS ingestion path -----
+                docs = load_documents(paths)
+                if not docs:
+                    raise ValueError("No valid documents loaded.")
+
+                chunks = self._split(
+                    docs,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                )
+
+                # FAISS Manager (very important class for docchat)
+                fm = FaissManager(self.faiss_dir, self.model_loader)
+                texts = [c.page_content for c in chunks]
+                metas = [c.metadata for c in chunks]
+
+                try:
+                    vs = fm.load_or_create(texts=texts, metadatas=metas)
+                except Exception:
+                    # If loading existing index fails, recreate
+                    vs = fm.load_or_create(texts=texts, metadatas=metas)
+
+                added = fm.add_documents(chunks)
+                log.info(
+                    "FAISS index updated",
+                    added=added,
+                    index=str(self.faiss_dir),
+                )
+
+                # Configure search parameters based on search_type
+                search_kwargs = {"k": k}
+                if search_type == "mmr":
+                    # MMR needs fetch_k (docs to fetch) and lambda_mult (diversity factor)
+                    search_kwargs["fetch_k"] = fetch_k
+                    search_kwargs["lambda_mult"] = lambda_mult
+                    log.info(
+                        "Using MMR search",
+                        k=k,
+                        fetch_k=fetch_k,
+                        lambda_mult=lambda_mult,
+                    )
+
+                return vs.as_retriever(
+                    search_type=search_type,
+                    search_kwargs=search_kwargs,
+                )
+
+            elif search_type == "pageindex":
+                # ----- PageIndex ingestion path (no FAISS, no chunking needed) -----
+                client = get_pageindex_client(self.model_loader.config)  # or load config elsewhere
+
+                doc_ids = []
+                for path in paths:
+                    # Optional: only accept PDFs for PageIndex
+                    if Path(path).suffix.lower() != ".pdf":
+                        log.warning(
+                            "Skipping non-PDF file for PageIndex",
+                            path=str(path),
+                        )
+                        continue
+
+                    doc_id = submit_document(str(path), self.session_id, client)
+                    doc_ids.append(doc_id)
+                    add_pageindex_doc(self.session_id, doc_id)
+                    log.info(
+                        "PageIndex doc stored for session",
+                        session_id=self.session_id,
+                        file_path=str(path),
+                        doc_id=doc_id,
+                    )
+
+                if not doc_ids:
+                    raise ValueError("No valid PDFs uploaded for PageIndex.")
+
+                stored_doc_ids = get_pageindex_docs(self.session_id)
+                if sorted(stored_doc_ids) != sorted(doc_ids):
+                    raise ValueError(
+                        f"Stored PageIndex doc_ids do not match ingestion output for session {self.session_id}: "
+                        f"stored={stored_doc_ids}, returned={doc_ids}"
+                    )
+
+                log.info(
+                    "PageIndex documents submitted",
+                    session_id=self.session_id,
+                    doc_ids=doc_ids,
+                    persisted_doc_ids=stored_doc_ids,
+                )
+
+                # Return a simple descriptor; retrieval.py will handle PageIndex queries
+                return {
+                    "backend": "pageindex",
+                    "session_id": self.session_id,
+                    "doc_ids": doc_ids,
+                }
+
+            else:
+                raise ValueError(f"Unsupported search_type: {search_type}")
+
+        except Exception as e:
+            log.error("Failed to build retriever", error=str(e))
+            raise DocumentPortalException(
+                "Error building retriever", str(e)
+            ) from e
+
+  # def built_retriever(self, uploaded_files: Iterable,*, chunk_size: int = 1000, chunk_overlap: int = 200, k: int = 5, search_type:str = "mmr", fetch_k:int = 20, lambda_mult:float = 0.5):
+  #   try:
+  #     paths = save_uploaded_files(uploaded_files, self.temp_dir)
+  #     docs = load_documents(paths)
+  #     if not docs:
+  #       raise ValueError("No valid documents loaded.")
+  #     chunks = self._split(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+  #     #FAISS Manager (very important class for docchat)
+  #     fm = FaissManager(self.faiss_dir, self.model_loader)
+  #     texts = [c.page_content for c in chunks]
+  #     metas = [c.metadata for c in chunks]
+
+  #     try:
+  #       vs = fm.load_or_create(texts=texts, metadatas=metas)
+  #     except Exception as e:
+  #       vs = fm.load_or_create(texts=texts, metadatas=metas)
       
-      added = fm.add_documents(chunks)
-      log.info("FAISS index updated", added=added, index=str(self.faiss_dir))
-      #Configure search parameters based on search_type
+  #     added = fm.add_documents(chunks)
+  #     log.info("FAISS index updated", added=added, index=str(self.faiss_dir))
+  #     #Configure search parameters based on search_type
 
-      search_kwargs = {"k":k}
-      if search_type == "mmr":
-        #MMR needs fetch_k (docs to fetch) and lambda_mult (diversity factor)
-        search_kwargs["fetch_k"] = fetch_k
-        search_kwargs["lambda_mult"] = lambda_mult
-        log.info("Using MMR search", k=k, fetch_k=fetch_k, lambda_mult=lambda_mult)
+  #     search_kwargs = {"k":k}
+  #     if search_type == "mmr":
+  #       #MMR needs fetch_k (docs to fetch) and lambda_mult (diversity factor)
+  #       search_kwargs["fetch_k"] = fetch_k
+  #       search_kwargs["lambda_mult"] = lambda_mult
+  #       log.info("Using MMR search", k=k, fetch_k=fetch_k, lambda_mult=lambda_mult)
 
-      return vs.as_retriever(search_type=search_type, search_kwargs=search_kwargs)
+  #     return vs.as_retriever(search_type=search_type, search_kwargs=search_kwargs)
     
-    except Exception as e:
-      log.error("Failed to build retriever", error=str(e))
-      raise DocumentPortalException("Error building retriever", str(e)) from e
+  #   except Exception as e:
+  #     log.error("Failed to build retriever", error=str(e))
+  #     raise DocumentPortalException("Error building retriever", str(e)) from e
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
@@ -175,3 +315,4 @@ class FaissManager:
     self.vs = FAISS.from_texts(texts, embedding=self.emb, metadatas=metadatas or [])
     self.vs.save_local(str(self.index_dir))
     return self.vs
+

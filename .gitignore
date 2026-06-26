@@ -152,3 +152,12 @@ sessions/
 !requirements.txt
 !pyproject.toml
 !uv.lock
+
+# ==================================================
+# Runtime Session Uploads
+# Keep sample datasets but ignore generated sessions
+# ==================================================
+data/session_*
+
+# PageIndex / session state
+data/pageindex_sessions.json

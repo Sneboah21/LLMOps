@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 from operator import itemgetter
 from typing import List, Dict, Any, Optional
 
@@ -14,6 +15,13 @@ from multi_doc_chat.logger.custom_logger import CustomLogger
 from multi_doc_chat.prompts.prompt_library import PROMPT_REGISTRY
 from multi_doc_chat.model.models import PromptType, ChatAnswer
 from pydantic import ValidationError
+
+from multi_doc_chat.src.document_chat.pageindex_retriever import (
+    get_pageindex_client,
+    retrieve_with_pageindex,
+)
+from multi_doc_chat.utils.config_loader import load_config
+from multi_doc_chat.utils.session_store import get_pageindex_docs
 
 log = CustomLogger().get_logger(__name__)
 
@@ -118,6 +126,53 @@ class ConversationalRAG:
   @staticmethod
   def _format_docs(docs) -> str:
     return "\n\n".join(getattr(d,"page_content",str(d)) for d in docs)
+
+  @staticmethod
+  def _normalize_pageindex_query(original_input: str, rewritten_question: str) -> str:
+    """
+    Keep PageIndex retrieval queries terse and question-shaped.
+
+    Some chat models return explanations like:
+      The original query is already a standalone question...
+      "When did World War 2 begin?"
+
+    That narration hurts retrieval quality, so we extract the actual question
+    or fall back to the original user input.
+    """
+    original = (original_input or "").strip()
+    rewritten = (rewritten_question or "").strip()
+
+    if not rewritten:
+      return original
+
+    quoted_questions = re.findall(r'"([^"\n\?]*\?)"', rewritten)
+    if quoted_questions:
+      candidate = quoted_questions[-1].strip()
+      if candidate:
+        return candidate
+
+    lines = [line.strip(" \"'") for line in rewritten.splitlines() if line.strip()]
+    question_lines = [line for line in lines if "?" in line]
+    if question_lines:
+      candidate = question_lines[-1].strip()
+      if candidate:
+        return candidate
+
+    lower = rewritten.lower()
+    narration_markers = (
+      "the original query",
+      "standalone question",
+      "therefore",
+      "i will leave it unchanged",
+      "unchanged:",
+    )
+    if any(marker in lower for marker in narration_markers):
+      return original or rewritten
+
+    if len(rewritten) > max(len(original) * 2, 160) and original:
+      return original
+
+    return rewritten
   
   def _build_lcel_chain(self):
     try:
@@ -151,3 +206,149 @@ class ConversationalRAG:
     except Exception as e:
       log.error("Failed to build LCEL chain", error = str(e), session_id = self.session_id)
       raise DocumentPortalException("LCEL chain building error in Conversational RAG", sys)
+
+
+  #--------------------------------------------------------------
+  def invoke_with_pageindex(
+        self,
+        user_input: str,
+        chat_history: Optional[List[BaseMessage]] = None,
+        top_k: int = 5,
+    ) -> str:
+        """
+        Conversational RAG path using PageIndex instead of FAISS.
+
+        Flow:
+          1) Rewrite user question with chat history (same contextualization as FAISS).
+          2) Use PageIndex to retrieve relevant sections/pages (vectorless DB).
+          3) Feed retrieved context + original question + chat history into QA prompt + LLM.
+        """
+        try:
+            chat_history = chat_history or []
+
+            # 1) Rewrite question using the same contextualize_prompt + LLM
+            #    This reuses your existing LCEL fragment.
+            question_rewriter = (
+                {"input": itemgetter("input"), "chat_history": itemgetter("chat_history")}
+                | self.contextualize_prompt
+                | self.llm
+                | StrOutputParser()
+            )
+
+            rewritten_question = question_rewriter.invoke(
+                {"input": user_input, "chat_history": chat_history}
+            )
+            retrieval_query = self._normalize_pageindex_query(
+                original_input=user_input,
+                rewritten_question=rewritten_question,
+            )
+            log.info(
+                "Prepared PageIndex retrieval query",
+                session_id=self.session_id,
+                original_input=user_input,
+                rewritten_question=rewritten_question,
+                retrieval_query=retrieval_query,
+            )
+
+            # 2) Retrieve context from PageIndex (vectorless DB)
+            #    Get doc_ids for this session, then call the PageIndex SDK.
+            cfg = load_config()
+            client = get_pageindex_client(cfg)
+            doc_ids = get_pageindex_docs(self.session_id)
+            log.info(
+                "Loaded PageIndex doc_ids for session",
+                session_id=self.session_id,
+                doc_ids=doc_ids,
+                doc_id_count=len(doc_ids),
+            )
+
+            if not doc_ids:
+                log.warning(
+                    "No PageIndex doc_ids found for session",
+                    session_id=self.session_id,
+                )
+                return "No documents available for this session."
+
+            # This is where the diagram's "uses logic to navigate to exact location"
+            # happens inside PageIndex. [web:59][web:65][web:110]
+            contexts = retrieve_with_pageindex(
+                query=retrieval_query,
+                session_doc_ids=doc_ids,
+                client=client,
+                top_k=top_k,
+            )
+            log.info(
+                "PageIndex retrieval returned contexts",
+                session_id=self.session_id,
+                doc_ids=doc_ids,
+                context_count=len(contexts),
+                context_previews=[text[:200] for text in contexts[:top_k]],
+            )
+
+            if not contexts:
+                log.warning(
+                    "PageIndex returned no context",
+                    session_id=self.session_id,
+                    query=retrieval_query,
+                )
+                return "No relevant context found in documents."
+
+            # Combine the retrieved sections into a single context string
+            context_text = "\n\n".join(contexts)
+
+            # 3) Answer using retrieved context + original question + chat history
+            answer_chain = (
+                {
+                    "context": itemgetter("context"),
+                    "input": itemgetter("input"),
+                    "chat_history": itemgetter("chat_history"),
+                }
+                | self.qa_prompt
+                | self.llm
+                | StrOutputParser()
+            )
+
+            payload = {
+                "context": context_text,
+                "input": user_input,
+                "chat_history": chat_history,
+            }
+
+            answer = answer_chain.invoke(payload)
+            if not answer:
+                log.warning(
+                    "No answer generated (PageIndex path)",
+                    user_input=user_input,
+                    session_id=self.session_id,
+                )
+                return "No answer generated."
+
+            # Validate with ChatAnswer model
+            try:
+                validated = ChatAnswer(answer=str(answer))
+                answer = validated.answer
+            except ValidationError as ve:
+                log.error("Invalid chat answer (PageIndex path)", error=str(ve))
+                raise DocumentPortalException(
+                    "Invalid chat answer generated by LLM (PageIndex)", sys
+                )
+
+            log.info(
+                "PageIndex chain invoked successfully",
+                user_input=user_input,
+                answer_preview=str(answer)[:150],
+                session_id=self.session_id,
+            )
+            return answer
+
+        except Exception as e:
+            log.error(
+                "Failed to invoke Conversational RAG with PageIndex",
+                error=str(e),
+                user_input=user_input,
+                session_id=self.session_id,
+            )
+            raise DocumentPortalException(
+                "Invocation error in Conversational RAG (PageIndex)", sys
+            )
+        #--------------------------------------------------------------

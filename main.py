@@ -16,6 +16,7 @@ from multi_doc_chat.exception.custom_exception import DocumentPortalException
 from multi_doc_chat.model.models import UploadResponse, ChatRequest, ChatResponse
 from multi_doc_chat.utils.document_ops import FastAPIFileAdapter
 
+from multi_doc_chat.utils.config_loader import load_config
 
 app = FastAPI(title="MultiDocChat")
 
@@ -142,6 +143,29 @@ async def upload_page():
     """
 
 
+# @app.post("/upload", response_model=UploadResponse)
+# async def upload(
+#     files: Annotated[list[UploadFile], File(description="Select one or more files")]
+# ) -> UploadResponse:
+#     if not files:
+#         raise HTTPException(status_code=400, detail="No files uploaded.")
+#     try:
+#         wrapped_files = [FastAPIFileAdapter(f) for f in files]
+#         ingestor = ChatIngestor(use_session_dirs=True)
+#         session_id = ingestor.session_id
+#         ingestor.built_retriever(uploaded_files=wrapped_files)
+#         SESSIONS[session_id] = []
+#         return UploadResponse(
+#             session_id=session_id,
+#             indexed=True,
+#             message="Files uploaded and indexed successfully."
+#         )
+#     except DocumentPortalException as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+#------------------------------------------------------------------
 @app.post("/upload", response_model=UploadResponse)
 async def upload(
     files: Annotated[list[UploadFile], File(description="Select one or more files")]
@@ -149,35 +173,116 @@ async def upload(
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
     try:
-        wrapped_files = [FastAPIFileAdapter(f) for f in files]
+        cfg = load_config()
+        retrieval_cfg = cfg.get("retrieval", {})
+        mode = retrieval_cfg.get("mode", "mmr")
+
+        # Eagerly read file contents while the FastAPI streams are open
+        wrapped_files = []
+        for f in files:
+            contents = await f.read()      # read async stream
+            await f.seek(0)                # rewind, just in case
+            wrapped_files.append(FastAPIFileAdapter(f, prefetched=contents))
+
         ingestor = ChatIngestor(use_session_dirs=True)
         session_id = ingestor.session_id
-        ingestor.built_retriever(uploaded_files=wrapped_files)
+
+        if mode in ("similarity", "mmr"):
+            # FAISS ingestion
+            ingestor.built_retriever(
+                uploaded_files=wrapped_files,
+                search_type=mode,
+                k=retrieval_cfg.get("top_k", 5),
+            )
+        elif mode == "pageindex":
+            # PageIndex ingestion (vectorless)
+            # Optionally enforce PDF-only here
+            non_pdf = [f for f in files if not f.filename.lower().endswith(".pdf")]
+            if non_pdf:
+                raise HTTPException(
+                    status_code=400,
+                    detail="In PageIndex mode, only PDF files are supported. "
+                           "Upload PDFs or switch retrieval.mode to 'mmr'/'similarity'."
+                )
+
+            ingestor.built_retriever(
+                uploaded_files=wrapped_files,
+                search_type="pageindex",
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported retrieval mode: {mode}",
+            )
+
         SESSIONS[session_id] = []
         return UploadResponse(
             session_id=session_id,
             indexed=True,
-            message="Files uploaded and indexed successfully."
+            message="Files uploaded and indexed successfully.",
         )
+
     except DocumentPortalException as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    #----------------------------------------------------------
 
 
+# @app.post("/chat", response_model=ChatResponse)
+# async def chat(req: ChatRequest) -> ChatResponse:
+#     session_id = req.session_id
+#     message = req.message.strip()
+#     if not session_id or session_id not in SESSIONS:
+#         raise HTTPException(status_code=400, detail="Invalid or expired session_id. Reupload documents.")
+#     if not message:
+#         raise HTTPException(status_code=400, detail="Message cannot be empty.")
+#     try:
+#         rag = ConversationalRAG(session_id=session_id)
+#         index_path = f"faiss_index/{session_id}"
+#         rag.load_retriever_from_faiss(index_path=index_path)
+
+#         simple = SESSIONS.get(session_id, [])
+#         lc_history = []
+#         for m in simple:
+#             role = m.get("role")
+#             content = m.get("content", "")
+#             if role == "user":
+#                 lc_history.append(HumanMessage(content=content))
+#             elif role == "assistant":
+#                 lc_history.append(AIMessage(content=content))
+
+#         answer = rag.invoke(message, chat_history=lc_history)
+#         simple.append({"role": "user", "content": message})
+#         simple.append({"role": "assistant", "content": answer})
+#         SESSIONS[session_id] = simple
+#         return ChatResponse(answer=answer)
+#     except DocumentPortalException as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+#----------------------------------------------------------
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     session_id = req.session_id
     message = req.message.strip()
     if not session_id or session_id not in SESSIONS:
-        raise HTTPException(status_code=400, detail="Invalid or expired session_id. Reupload documents.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired session_id. Reupload documents.",
+        )
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
-    try:
-        rag = ConversationalRAG(session_id=session_id)
-        index_path = f"faiss_index/{session_id}"
-        rag.load_retriever_from_faiss(index_path=index_path)
 
+    try:
+        cfg = load_config()
+        retrieval_cfg = cfg.get("retrieval", {})
+        mode = retrieval_cfg.get("mode", "mmr")
+        top_k = retrieval_cfg.get("top_k", 5)
+
+        rag = ConversationalRAG(session_id=session_id)
+
+        # Build LangChain-style chat history from SESSIONS
         simple = SESSIONS.get(session_id, [])
         lc_history = []
         for m in simple:
@@ -188,16 +293,39 @@ async def chat(req: ChatRequest) -> ChatResponse:
             elif role == "assistant":
                 lc_history.append(AIMessage(content=content))
 
-        answer = rag.invoke(message, chat_history=lc_history)
+        if mode in ("similarity", "mmr"):
+            # FAISS flow (existing behavior)
+            index_path = f"faiss_index/{session_id}"
+            rag.load_retriever_from_faiss(
+                index_path=index_path,
+                k=top_k,
+                search_type=mode,
+            )
+            answer = rag.invoke(message, chat_history=lc_history)
+        elif mode == "pageindex":
+            # PageIndex flow (vectorless DB)
+            answer = rag.invoke_with_pageindex(
+                user_input=message,
+                chat_history=lc_history,
+                top_k=top_k,
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported retrieval mode: {mode}",
+            )
+
+        # Update simple history (same for both modes)
         simple.append({"role": "user", "content": message})
         simple.append({"role": "assistant", "content": answer})
         SESSIONS[session_id] = simple
+
         return ChatResponse(answer=answer)
     except DocumentPortalException as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
-
+#----------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
