@@ -1,4 +1,4 @@
-langchain
+﻿langchain
 langchain-community
 langchain-ollama
 langchain-core
@@ -22,3 +22,10 @@ pandas
 
 langsmith
 structlog
+
+
+
+SQLAlchemy>=2.0
+psycopg2-binary>=2.9
+alembic>=1.13
+pypdf

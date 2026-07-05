@@ -161,3 +161,6 @@ data/session_*
 
 # PageIndex / session state
 data/pageindex_sessions.json
+# Alembic cache
+alembic/__pycache__/
+alembic/versions/__pycache__/

@@ -1,130 +1,163 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import hashlib
 from pathlib import Path
 import sys
-from typing import Iterable, List, Optional, Dict, Any
+from typing import Iterable, List, Optional, Dict, Any, Union
 import uuid
+from datetime import datetime
+import json
+
 from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+
 from multi_doc_chat.logger.custom_logger import CustomLogger
 from multi_doc_chat.exception.custom_exception import DocumentPortalException
-import json
 from multi_doc_chat.utils.file_io import save_uploaded_files
 from multi_doc_chat.utils.model_loader import ModelLoader
 from multi_doc_chat.utils.document_ops import load_documents
-from datetime import datetime
+from multi_doc_chat.utils.config_loader import load_config
 
 from multi_doc_chat.src.document_chat.pageindex_retriever import (
     get_pageindex_client,
     submit_document,
 )
-from multi_doc_chat.utils.session_store import add_pageindex_doc, get_pageindex_docs
 
 log = CustomLogger().get_logger(__name__)
 
+
 def generate_session_id() -> str:
-  """Generate a unique session ID with timestamp."""
-  timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-  unique_id = uuid.uuid4().hex[:8]  # Short unique identifier
-  return f"session_{timestamp}_{unique_id}"
+    """Generate a unique session ID with timestamp."""
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    unique_id = uuid.uuid4().hex[:8]
+    return f"session_{timestamp}_{unique_id}"
+
 
 class ChatIngestor:
-  def __init__(self, temp_base:str = "data", faiss_base:str = "faiss_index", use_session_dirs:bool = True, session_id: Optional[str] = None):
-    try:
-      self.model_loader = ModelLoader()
-      self.use_session = use_session_dirs
-      self.session_id = session_id or generate_session_id()
+    def __init__(
+        self,
+        temp_base: str = "data",
+        faiss_base: str = "faiss_index",
+        use_session_dirs: bool = True,
+        session_id: Optional[str] = None,
+        cfg: Optional[dict] = None,
+    ):
+        try:
+            self.model_loader = ModelLoader()
+            self.cfg = cfg or load_config()
+            self.use_session = use_session_dirs
+            self.session_id = session_id or generate_session_id()
 
-      self.temp_base = Path(temp_base); self.temp_base.mkdir(parents=True, exist_ok=True)
-      self.faiss_base = Path(faiss_base); self.faiss_base.mkdir(parents=True, exist_ok=True)
+            self.temp_base = Path(temp_base)
+            self.temp_base.mkdir(parents=True, exist_ok=True)
 
-      self.temp_dir = self._resolve_dir(self.temp_base)
-      self.faiss_dir = self._resolve_dir(self.faiss_base)
+            self.faiss_base = Path(faiss_base)
+            self.faiss_base.mkdir(parents=True, exist_ok=True)
 
-      log.info("ChatIngestor initialized", session_id = self.session_id, temp_dir = str(self.temp_dir), faiss_dir = str(self.faiss_dir), sessionlized = self.use_session)
-    
-    except Exception as e:
-      log.error("Failed to initialize ChatIngestor", error = str(e))
-      raise DocumentPortalException("Initialization error in ChatIngestor", str(e)) from e
-    
-  def _resolve_dir(self, base: Path):
-    if self.use_session:
-      d = base / self.session_id
-      d.mkdir(parents=True, exist_ok=True)  #creates dir if not exists
-      return d
-    return base   #fallback : "faiss_index"
-  
-  def _split(self, docs: List[Document], chunk_size=1000, chunk_overlap=200) -> List[Document]:
-    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    chunks = splitter.split_documents(docs)
-    log.info("Documents split", chunks=len(chunks), chunk_size=chunk_size, overlap=chunk_overlap)
-    return chunks
-  
+            self.temp_dir = self._resolve_dir(self.temp_base)
+            self.faiss_dir = self._resolve_dir(self.faiss_base)
 
-  def built_retriever(
+            log.info(
+                "ChatIngestor initialized",
+                session_id=self.session_id,
+                temp_dir=str(self.temp_dir),
+                faiss_dir=str(self.faiss_dir),
+                sessionlized=self.use_session,
+            )
+
+        except Exception as e:
+            log.error("Failed to initialize ChatIngestor", error=str(e))
+            raise DocumentPortalException("Initialization error in ChatIngestor", e) from e
+
+    def _resolve_dir(self, base: Path) -> Path:
+        if self.use_session:
+            d = base / self.session_id
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        return base
+
+    def _split(self, docs: List[Document], chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Document]:
+        splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        chunks = splitter.split_documents(docs)
+        log.info(
+            "Documents split",
+            chunks=len(chunks),
+            chunk_size=chunk_size,
+            overlap=chunk_overlap,
+        )
+        return chunks
+
+    def built_retriever(
         self,
         uploaded_files: Iterable,
         *,
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
         k: int = 5,
-        search_type: str = "mmr",          # "similarity" | "mmr" | "pageindex"
+        search_type: str = "mmr",
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
-    ):
+    ) -> Union[BaseRetriever, List[str]]:
         """
         Prepare retrieval backend for this session.
 
         - For "similarity" / "mmr":
             * Ingest docs into FAISS
-            * Return a LangChain retriever (existing behavior)
+            * Return a LangChain retriever
 
         - For "pageindex":
             * Save files
             * Upload PDFs to PageIndex
-            * Store doc_ids for this session
-            * Return a descriptor with backend + doc_ids (no FAISS retriever)
+            * Return list of doc_ids for this session
         """
         try:
-            # 1. Save uploaded files to session directory
             paths = save_uploaded_files(uploaded_files, self.temp_dir)
 
-            # Branch by search_type
             if search_type in ("similarity", "mmr"):
-                # ----- Existing FAISS ingestion path -----
+                log.info(
+                    "Starting FAISS ingestion pipeline",
+                    session_id=self.session_id,
+                    file_count=len(paths),
+                    search_type=search_type,
+                )
+
                 docs = load_documents(paths)
                 if not docs:
-                    raise ValueError("No valid documents loaded.")
+                    raise DocumentPortalException("No valid documents loaded for FAISS ingestion.")
 
                 chunks = self._split(
                     docs,
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap,
                 )
+                if not chunks:
+                    raise DocumentPortalException("Document loading succeeded but no chunks were produced.")
 
-                # FAISS Manager (very important class for docchat)
-                fm = FaissManager(self.faiss_dir, self.model_loader)
                 texts = [c.page_content for c in chunks]
                 metas = [c.metadata for c in chunks]
 
-                try:
-                    vs = fm.load_or_create(texts=texts, metadatas=metas)
-                except Exception:
-                    # If loading existing index fails, recreate
-                    vs = fm.load_or_create(texts=texts, metadatas=metas)
-
-                added = fm.add_documents(chunks)
                 log.info(
-                    "FAISS index updated",
-                    added=added,
-                    index=str(self.faiss_dir),
+                    "Creating FAISS index from chunks",
+                    session_id=self.session_id,
+                    chunk_count=len(chunks),
+                    text_count=len(texts),
                 )
 
-                # Configure search parameters based on search_type
+                fm = FaissManager(self.faiss_dir, self.model_loader)
+                vs = fm.load_or_create(texts=texts, metadatas=metas)
+
+                #added = fm.add_documents(chunks)
+                log.info(
+                    "FAISS index updated",
+                    chunk_count=len(chunks),        #-------------
+                    #added=added,
+                    index=str(self.faiss_dir),
+                    session_id=self.session_id,
+                )
+
                 search_kwargs = {"k": k}
                 if search_type == "mmr":
-                    # MMR needs fetch_k (docs to fetch) and lambda_mult (diversity factor)
                     search_kwargs["fetch_k"] = fetch_k
                     search_kwargs["lambda_mult"] = lambda_mult
                     log.info(
@@ -139,180 +172,145 @@ class ChatIngestor:
                     search_kwargs=search_kwargs,
                 )
 
-            elif search_type == "pageindex":
-                # ----- PageIndex ingestion path (no FAISS, no chunking needed) -----
-                client = get_pageindex_client(self.model_loader.config)  # or load config elsewhere
+            if search_type == "pageindex":
+                client = get_pageindex_client(self.cfg)
 
-                doc_ids = []
+                doc_ids: List[str] = []
                 for path in paths:
-                    # Optional: only accept PDFs for PageIndex
-                    if Path(path).suffix.lower() != ".pdf":
+                    p = Path(path)
+                    if p.suffix.lower() != ".pdf":
                         log.warning(
                             "Skipping non-PDF file for PageIndex",
                             path=str(path),
                         )
                         continue
 
-                    doc_id = submit_document(str(path), self.session_id, client)
+                    try:
+                        doc_id = submit_document(str(path), self.session_id, client)
+                    except Exception as e:
+                        log.error(
+                            "PageIndex document upload failed",
+                            session_id=self.session_id,
+                            file_path=str(path),
+                            error=str(e),
+                        )
+                        continue
+
                     doc_ids.append(doc_id)
-                    add_pageindex_doc(self.session_id, doc_id)
                     log.info(
-                        "PageIndex doc stored for session",
+                        "PageIndex doc uploaded for session",
                         session_id=self.session_id,
                         file_path=str(path),
                         doc_id=doc_id,
                     )
 
                 if not doc_ids:
-                    raise ValueError("No valid PDFs uploaded for PageIndex.")
-
-                stored_doc_ids = get_pageindex_docs(self.session_id)
-                if sorted(stored_doc_ids) != sorted(doc_ids):
-                    raise ValueError(
-                        f"Stored PageIndex doc_ids do not match ingestion output for session {self.session_id}: "
-                        f"stored={stored_doc_ids}, returned={doc_ids}"
+                    raise DocumentPortalException(
+                        "No valid PDFs uploaded for PageIndex",
+                        "No PageIndex documents were uploaded successfully.",
                     )
 
                 log.info(
                     "PageIndex documents submitted",
                     session_id=self.session_id,
                     doc_ids=doc_ids,
-                    persisted_doc_ids=stored_doc_ids,
                 )
+                return doc_ids
 
-                # Return a simple descriptor; retrieval.py will handle PageIndex queries
-                return {
-                    "backend": "pageindex",
-                    "session_id": self.session_id,
-                    "doc_ids": doc_ids,
-                }
+            raise ValueError(f"Unsupported search_type: {search_type}")
 
-            else:
-                raise ValueError(f"Unsupported search_type: {search_type}")
-
+        except DocumentPortalException as e:
+            log.error(
+                "Failed to build retriever",
+                session_id=self.session_id,
+                search_type=search_type,
+                error=str(e),
+                traceback=getattr(e, "traceback_str", ""),
+            )
+            raise
         except Exception as e:
-            log.error("Failed to build retriever", error=str(e))
+            log.error(
+                "Failed to build retriever",
+                session_id=self.session_id,
+                search_type=search_type,
+                error=str(e),
+            )
             raise DocumentPortalException(
-                "Error building retriever", str(e)
+                "Error building retriever",
+                e,
             ) from e
 
-  # def built_retriever(self, uploaded_files: Iterable,*, chunk_size: int = 1000, chunk_overlap: int = 200, k: int = 5, search_type:str = "mmr", fetch_k:int = 20, lambda_mult:float = 0.5):
-  #   try:
-  #     paths = save_uploaded_files(uploaded_files, self.temp_dir)
-  #     docs = load_documents(paths)
-  #     if not docs:
-  #       raise ValueError("No valid documents loaded.")
-  #     chunks = self._split(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-
-  #     #FAISS Manager (very important class for docchat)
-  #     fm = FaissManager(self.faiss_dir, self.model_loader)
-  #     texts = [c.page_content for c in chunks]
-  #     metas = [c.metadata for c in chunks]
-
-  #     try:
-  #       vs = fm.load_or_create(texts=texts, metadatas=metas)
-  #     except Exception as e:
-  #       vs = fm.load_or_create(texts=texts, metadatas=metas)
-      
-  #     added = fm.add_documents(chunks)
-  #     log.info("FAISS index updated", added=added, index=str(self.faiss_dir))
-  #     #Configure search parameters based on search_type
-
-  #     search_kwargs = {"k":k}
-  #     if search_type == "mmr":
-  #       #MMR needs fetch_k (docs to fetch) and lambda_mult (diversity factor)
-  #       search_kwargs["fetch_k"] = fetch_k
-  #       search_kwargs["lambda_mult"] = lambda_mult
-  #       log.info("Using MMR search", k=k, fetch_k=fetch_k, lambda_mult=lambda_mult)
-
-  #     return vs.as_retriever(search_type=search_type, search_kwargs=search_kwargs)
-    
-  #   except Exception as e:
-  #     log.error("Failed to build retriever", error=str(e))
-  #     raise DocumentPortalException("Error building retriever", str(e)) from e
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
-#FAISS Manager (loard-or-create)
+
 class FaissManager:
-  def __init__(self, index_dir: Path, model_loader: Optional[ModelLoader] = None):
-    self.index_dir = Path(index_dir)
-    self.index_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, faiss_dir: Path, model_loader: ModelLoader):
+        self.faiss_dir = Path(faiss_dir)
+        self.faiss_dir.mkdir(parents=True, exist_ok=True)
+        self.model_loader = model_loader
+        self.vs: Optional[FAISS] = None
 
-    self.meta_path = self.index_dir / "ingested_meta.json"
-    self._meta: Dict[str,Any] = {"rows":{}} #this is dict of rows
+    def _state_path(self) -> Path:
+        return self.faiss_dir / "index_state.json"
 
-    if self.meta_path.exists():
-      try:
-        self._meta = json.loads(self.meta_path.read_text(encoding="utf-8")) or {"rows":{}} #load it if already there
-      except Exception:
-        self._meta = {"rows":{}} 
+    def _compute_fp(self, texts: List[str], metadatas: Optional[List[dict]] = None) -> str:
+        h = hashlib.sha256()
+        for i, t in enumerate(texts):
+            h.update(t.encode("utf-8", errors="ignore"))
+            if metadatas and i < len(metadatas):
+                h.update(json.dumps(metadatas[i], sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        return h.hexdigest()
 
-    self.model_loader = model_loader or ModelLoader()
-    self.emb = self.model_loader.load_embeddings()
-    self.vs: Optional[FAISS] = None
-  
-  def _exists(self) -> bool:
-    return (self.index_dir / "index.faiss").exists() and (self.index_dir / "index.pkl").exists()
-  
-  @staticmethod
-  def _fingerprint(text:str, md: Dict[str,Any]) -> str:
-    src = md.get("source") or md.get("file_path")
-    rid = md.get("row_id")
-    if src is not None:
-      return f"{src}::{''if rid is None else rid}"
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-  
-  def _save_meta(self):
-    self.meta_path.write_text(
-        json.dumps(
-            self._meta,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
+    def _load_state(self) -> Dict[str, Any]:
+        p = self._state_path()
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+        return {}
 
+    def _save_state(self, state: Dict[str, Any]) -> None:
+        self._state_path().write_text(json.dumps(state, indent=2), encoding="utf-8")
 
-  def add_documents(self, docs: List[Document]):
-    if self.vs is None:
-      raise RuntimeError(
-          "Call load_or_create() before add_documents_idempotent()."
-      )
+    def load_or_create(self, texts: List[str], metadatas: Optional[List[dict]] = None) -> FAISS:
+        #embeddings = self.model_loader.get_embeddings_model()
+        embeddings = self.model_loader.load_embeddings()
+        index_name = (self.model_loader.config.get("vectorstore", {}) or {}).get("index_name", "index")
+        #index_name = (self.model_loader.cfg.get("embeddings") or {}).get("faiss_index_name", "index")
+        fp = self._compute_fp(texts, metadatas)
+        state = self._load_state()
+        same = state.get("fingerprint") == fp and state.get("index_name") == index_name
 
-    new_docs: List[Document] = []
+        if same:
+            try:
+                self.vs = FAISS.load_local(
+                    str(self.faiss_dir),
+                    embeddings,
+                    index_name=index_name,
+                    allow_dangerous_deserialization=True,
+                )
+                return self.vs
+            except Exception as e:
+                log.warning("Failed to load existing FAISS index; rebuilding", error=str(e))
 
-    for d in docs:
-      key = self._fingerprint(
-          d.page_content,
-          d.metadata or {}
-      )
-      if key in self._meta["rows"]:
-        continue
-      self._meta["rows"][key] = True
-      new_docs.append(d)
+        self.vs = FAISS.from_texts(texts=texts, embedding=embeddings, metadatas=metadatas)
+        self.vs.save_local(str(self.faiss_dir), index_name=index_name)
+        self._save_state({"fingerprint": fp, "index_name": index_name})
+        return self.vs
 
-    if new_docs:
-      self.vs.add_documents(new_docs)
-      self.vs.save_local(str(self.index_dir))
-      self._save_meta()
-    return len(new_docs)
+    def add_documents(self, docs: List[Document]) -> int:
+        if not docs:
+            return 0
+        if self.vs is None:
+            raise ValueError("Vector store is not initialized. Call load_or_create() first.")
 
-
-  def load_or_create(self, texts: Optional[List[str]] = None, metadatas: Optional[List[dict]] = None):
-    # if we running first time then it will not go in this block
-    if self._exists():
-      self.vs = FAISS.load_local(
-        str(self.index_dir),
-        embeddings=self.emb,
-        allow_dangerous_deserialization=True,
-      )
-      return self.vs
-  
-    if not texts:
-      raise DocumentPortalException("No existing FAISS index and no data to create one", sys)
-    #Creating the vectorstore from scratch
-    self.vs = FAISS.from_texts(texts, embedding=self.emb, metadatas=metadatas or [])
-    self.vs.save_local(str(self.index_dir))
-    return self.vs
-
+        index_name = "index"
+        self.vs.add_documents(docs)
+        self.vs.save_local(str(self.faiss_dir), index_name=index_name)
+        return len(docs)
+        # self.vs.add_documents(docs)
+        # index_name = (self.model_loader.cfg.get("embeddings") or {}).get("faiss_index_name", "index")
+        # self.vs.save_local(str(self.faiss_dir), index_name=index_name)
+        # return len(docs)

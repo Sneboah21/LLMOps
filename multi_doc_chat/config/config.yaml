@@ -58,3 +58,8 @@ llm:
 
 logging:
   level: INFO
+
+
+#------------------------------------------------------
+database:
+  url: "env:DATABASE_URL"
