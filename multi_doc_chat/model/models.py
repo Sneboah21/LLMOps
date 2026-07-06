@@ -1,6 +1,8 @@
+from datetime import datetime
 from enum import Enum
-from pydantic import BaseModel, Field
-from  typing import Annotated
+from typing import Annotated, List, Optional
+
+from pydantic import BaseModel, Field, EmailStr
 
 class PromptType(str, Enum):
     """
@@ -28,4 +30,49 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
-    
+
+
+class DocumentResponse(BaseModel):
+    filename: str
+    file_type: str
+    file_path: str
+    faiss_index_path: Optional[str] = None
+    pageindex_doc_id: Optional[str] = None
+    created_at: datetime
+
+
+class ChatMessageResponse(BaseModel):
+    role: str
+    content: str
+    created_at: datetime
+
+
+class SessionSummaryResponse(BaseModel):
+    session_id: str
+    created_at: datetime
+    document_count: int
+    message_count: int
+    backend: Optional[str] = None
+    is_active: bool
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+    confirm_password: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: int
+    email: EmailStr
+    created_at: datetime
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    expires_in: int

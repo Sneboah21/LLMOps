@@ -24,8 +24,12 @@ langsmith
 structlog
 
 
-
 SQLAlchemy>=2.0
 psycopg2-binary>=2.9
 alembic>=1.13
 pypdf
+
+
+passlib[bcrypt]
+python-jose[cryptography]
+email-validator

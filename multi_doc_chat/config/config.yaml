@@ -63,3 +63,8 @@ logging:
 #------------------------------------------------------
 database:
   url: "env:DATABASE_URL"
+
+auth:
+  jwt_secret_key: "env:JWT_SECRET_KEY"
+  jwt_algorithm: "HS256"
+  access_token_expire_minutes: 60

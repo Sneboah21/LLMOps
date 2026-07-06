@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session as DBSession
 
@@ -53,7 +53,10 @@ def create_session_with_documents(
     It does NOT commit or roll back; the caller owns the transaction boundary.
     """
     try:
-        session_obj = repo.build_session(session_id=session_id, user_id=user_id)
+        session_obj = repo.build_session(
+            session_id=session_id,
+            user_id=user_id,
+        )
         repo.add_session(db, session_obj)
 
         # Flush to get session_obj.id populated without committing yet
@@ -91,12 +94,23 @@ def create_session_with_documents(
         ) from e
 
 
+# def get_session_by_session_id(
+#     db: DBSession,
+#     session_id: str,
+# ) -> Optional[models.Session]:
+#     return repo.get_session_by_session_id(db, session_id)
+
 def get_session_by_session_id(
     db: DBSession,
     session_id: str,
+    *,
+    user_id: Optional[int] = None,
 ) -> Optional[models.Session]:
-    return repo.get_session_by_session_id(db, session_id)
-
+    return repo.get_session_by_session_id(
+        db,
+        session_id,
+        user_id=user_id,
+    )
 
 def get_chat_history(
     db: DBSession,
@@ -184,4 +198,127 @@ def get_pageindex_doc_ids_for_session(
         )
         raise DocumentPortalException(
             "Failed to load PageIndex document ids for session", str(e)
+        ) from e
+
+
+def list_sessions(
+    db: DBSession,
+    *,
+    user_id: Optional[int] = None,
+    include_inactive: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    try:
+        rows = repo.get_all_sessions_with_counts(
+            db,
+            user_id=user_id,
+            include_inactive=include_inactive,
+            limit=limit,
+            offset=offset,
+        )
+
+        summaries: List[Dict[str, Any]] = []
+        for row in rows:
+            backend = None
+            if row.has_pageindex:
+                backend = "pageindex"
+            elif row.has_faiss:
+                backend = "faiss"
+
+            summaries.append(
+                {
+                    "session_id": row.session_id,
+                    "created_at": row.created_at,
+                    "document_count": row.document_count,
+                    "message_count": row.message_count,
+                    "backend": backend,
+                    "is_active": row.is_active,
+                }
+            )
+
+        log.info(
+            "Session summaries loaded",
+            count=len(summaries),
+            user_id=user_id,
+            include_inactive=include_inactive,
+        )
+        return summaries
+
+    except Exception as e:
+        log.error(
+            "Failed to list sessions",
+            user_id=user_id,
+            include_inactive=include_inactive,
+            error=str(e),
+        )
+        raise DocumentPortalException(
+            "Failed to list sessions",
+            str(e),
+        ) from e
+
+
+def get_session_documents(
+    db: DBSession,
+    session_id: str,
+    *,
+    user_id: Optional[int] = None,
+) -> List[models.Document]:
+    try:
+        docs = repo.get_session_documents(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+        log.info(
+            "Session documents loaded",
+            session_id=session_id,
+            document_count=len(docs),
+        )
+        return docs
+
+    except Exception as e:
+        log.error(
+            "Failed to load session documents",
+            session_id=session_id,
+            user_id=user_id,
+            error=str(e),
+        )
+        raise DocumentPortalException(
+            "Failed to load session documents",
+            str(e),
+        ) from e
+
+
+def get_session_messages(
+    db: DBSession,
+    session_id: str,
+    *,
+    user_id: Optional[int] = None,
+) -> List[models.ChatMessage]:
+    try:
+        messages = repo.get_session_messages(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+        log.info(
+            "Session messages loaded",
+            session_id=session_id,
+            message_count=len(messages),
+        )
+        return messages
+
+    except Exception as e:
+        log.error(
+            "Failed to load session messages",
+            session_id=session_id,
+            user_id=user_id,
+            error=str(e),
+        )
+        raise DocumentPortalException(
+            "Failed to load session messages",
+            str(e),
         ) from e

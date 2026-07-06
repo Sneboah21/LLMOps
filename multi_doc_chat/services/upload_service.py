@@ -153,6 +153,7 @@ class UploadService:
         self,
         wrapped_files: List[FastAPIFileAdapter],
         original_filenames: List[str],
+        user_id: int,
     ) -> str:
         retrieval_cfg = self.cfg.get("retrieval", {})
         mode = retrieval_cfg.get("mode", "mmr")
@@ -247,6 +248,7 @@ class UploadService:
                 db=self.db,
                 session_id=session_id,
                 documents=document_inputs,
+                user_id=user_id,
             )
 
             self.db.commit()

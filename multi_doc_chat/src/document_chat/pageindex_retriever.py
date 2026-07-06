@@ -274,7 +274,57 @@ def submit_document(file_path: str, session_id: str, client: PageIndexClient) ->
     result = client.submit_document(file_path)
     doc_id = result["doc_id"]
     return doc_id
+#-------------------------------------------------
+def delete_pageindex_document(
+    doc_id: str,
+    client: PageIndexClient,
+) -> bool:
+    """
+    Delete a PageIndex document by doc_id.
 
+    Returns:
+        True  -> document deleted remotely
+        False -> document was already missing / not found
+
+    Raises:
+        RuntimeError or SDK exception for non-idempotent failures
+    """
+    if not doc_id:
+        return False
+
+    try:
+        delete_fn = getattr(client, "delete_document", None)
+        if delete_fn is None:
+            raise RuntimeError(
+                "PageIndex client does not expose delete_document(doc_id)"
+            )
+
+        delete_fn(doc_id)
+
+        log.info(
+            "PageIndex document deleted",
+            doc_id=doc_id,
+        )
+        return True
+
+    except Exception as e:
+        message = str(e).lower()
+
+        if any(token in message for token in ("not found", "404", "does not exist", "missing")):
+            log.warning(
+                "PageIndex document already absent",
+                doc_id=doc_id,
+                error=str(e),
+            )
+            return False
+
+        log.error(
+            "Failed to delete PageIndex document",
+            doc_id=doc_id,
+            error=str(e),
+        )
+        raise
+#-------------------------------------------------
 
 def wait_until_retrieval_ready(
     doc_id: str,
