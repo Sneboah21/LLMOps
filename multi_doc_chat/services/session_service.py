@@ -42,6 +42,7 @@ def create_session_with_documents(
     db: DBSession,
     session_id: str,
     documents: List[DocumentInput],
+    display_name: Optional[str] = None,
     user_id: Optional[int] = None,
 ) -> models.Session:
     """
@@ -55,6 +56,7 @@ def create_session_with_documents(
     try:
         session_obj = repo.build_session(
             session_id=session_id,
+            display_name=display_name or session_id,
             user_id=user_id,
         )
         repo.add_session(db, session_obj)
@@ -229,6 +231,7 @@ def list_sessions(
             summaries.append(
                 {
                     "session_id": row.session_id,
+                    "display_name": row.display_name or row.session_id,
                     "created_at": row.created_at,
                     "document_count": row.document_count,
                     "message_count": row.message_count,
@@ -322,3 +325,53 @@ def get_session_messages(
             "Failed to load session messages",
             str(e),
         ) from e
+
+
+def rename_session(
+    db: DBSession,
+    session_id: str,
+    display_name: str,
+    *,
+    user_id: int,
+) -> models.Session:
+    normalized_name = display_name.strip()
+    if not normalized_name:
+        raise DocumentPortalException("Display name cannot be empty.")
+
+    if len(normalized_name) > 255:
+        raise DocumentPortalException("Display name cannot exceed 255 characters.")
+
+    try:
+        session_obj = repo.get_session_by_session_id(
+            db,
+            session_id,
+            user_id=user_id,
+        )
+        if session_obj is None:
+            raise DocumentPortalException(f"Session '{session_id}' not found.")
+
+        repo.update_session_display_name(
+            db,
+            session_obj,
+            normalized_name,
+        )
+        db.flush()
+        db.refresh(session_obj)
+
+        log.info(
+            "Session renamed",
+            session_id=session_id,
+            user_id=user_id,
+        )
+        return session_obj
+
+    except DocumentPortalException:
+        raise
+    except Exception as e:
+        log.error(
+            "Failed to rename session",
+            session_id=session_id,
+            user_id=user_id,
+            error=str(e),
+        )
+        raise DocumentPortalException("Failed to rename session", str(e)) from e

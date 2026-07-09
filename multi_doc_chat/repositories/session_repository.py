@@ -8,10 +8,12 @@ from sqlalchemy.orm import Session as DBSession, selectinload
 
 def build_session(
     session_id: str,
+    display_name: Optional[str] = None,
     user_id: Optional[int] = None,
 ) -> models.Session:
     return models.Session(
         session_id=session_id,
+        display_name=display_name,
         user_id=user_id,
     )
 
@@ -128,6 +130,7 @@ def get_all_sessions_with_counts(
     query = (
         db.query(
             models.Session.session_id,
+            models.Session.display_name,
             models.Session.created_at,
             models.Session.is_active,
             func.coalesce(doc_counts.c.document_count, 0).label("document_count"),
@@ -234,6 +237,16 @@ def delete_session(
     session_obj: models.Session,
 ) -> None:
     db.delete(session_obj)
+
+
+def update_session_display_name(
+    db: DBSession,
+    session_obj: models.Session,
+    display_name: str,
+) -> models.Session:
+    session_obj.display_name = display_name
+    db.add(session_obj)
+    return session_obj
 
 
 def build_chat_message(

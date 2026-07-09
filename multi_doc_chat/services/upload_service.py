@@ -140,6 +140,20 @@ class UploadService:
         self.db = db
         self.cfg = cfg
 
+    def _resolve_retrieval_mode(self, retrieval_backend: str | None) -> str:
+        config_mode = self.cfg.get("retrieval", {}).get("mode", "mmr")
+
+        if retrieval_backend:
+            normalized = retrieval_backend.strip().lower()
+            if normalized in ("similarity", "mmr", "pageindex"):
+                return normalized
+            if normalized == "faiss":
+                if config_mode in ("similarity", "mmr"):
+                    return config_mode
+                return "mmr"
+
+        return config_mode
+
     def _cleanup_dirs(self, temp_dir: Path, faiss_dir: Path) -> None:
         for d in {temp_dir, faiss_dir}:
             try:
@@ -154,9 +168,10 @@ class UploadService:
         wrapped_files: List[FastAPIFileAdapter],
         original_filenames: List[str],
         user_id: int,
+        retrieval_backend: str | None = None,
     ) -> str:
         retrieval_cfg = self.cfg.get("retrieval", {})
-        mode = retrieval_cfg.get("mode", "mmr")
+        mode = self._resolve_retrieval_mode(retrieval_backend)
 
         ingestor = ChatIngestor(use_session_dirs=True, cfg=self.cfg)
         session_id = ingestor.session_id
@@ -248,6 +263,7 @@ class UploadService:
                 db=self.db,
                 session_id=session_id,
                 documents=document_inputs,
+                display_name=session_id,
                 user_id=user_id,
             )
 

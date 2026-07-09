@@ -2,8 +2,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Annotated
+import subprocess
+import sys
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Depends, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +19,8 @@ from multi_doc_chat.model.models import (
     ChatResponse,
     DocumentResponse,
     LoginRequest,
+    RenameSessionRequest,
+    RenameSessionResponse,
     RegisterRequest,
     SessionSummaryResponse,
     TokenResponse,
@@ -54,7 +58,24 @@ from multi_doc_chat.services.session_delete_service import (
 
 CONFIG = load_config()
 
+
+def _ensure_database_migrated() -> None:
+    alembic_ini = BASE_DIR / "alembic.ini"
+    if not alembic_ini.exists():
+        return
+
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", str(alembic_ini), "upgrade", "head"],
+        check=True,
+        cwd=str(BASE_DIR),
+    )
+
 app = FastAPI(title="MultiDocChat")
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    _ensure_database_migrated()
 
 app.add_middleware(
     CORSMiddleware,
@@ -76,10 +97,15 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request=request, name="index.html")
-
+# @app.get("/", response_class=HTMLResponse)
+# def home(request: Request) -> HTMLResponse:
+#     return templates.TemplateResponse(request=request, name="index.html")
+@app.get("/")
+def root():
+    return {
+        "message": "LLMOps Backend API",
+        "docs": "/docs"
+    }
 
 @app.get("/upload-page", response_class=HTMLResponse)
 async def upload_page():
@@ -209,6 +235,7 @@ async def login(
 @app.post("/upload", response_model=UploadResponse)
 async def upload(
     files: Annotated[list[UploadFile], File(description="Select one or more files")],
+    retrieval_backend: Annotated[str | None, Form()] = None,
     db: Session = Depends(get_db),
     current_user: db_models.User = Depends(get_current_user),
 ) -> UploadResponse:
@@ -229,6 +256,7 @@ async def upload(
             wrapped_files=wrapped_files,
             original_filenames=filenames,
             user_id=current_user.id,
+            retrieval_backend=retrieval_backend,
         )
 
         return UploadResponse(
@@ -256,6 +284,7 @@ async def list_sessions(
         return [
             SessionSummaryResponse(
                 session_id=row["session_id"],
+                display_name=row["display_name"],
                 created_at=row["created_at"],
                 document_count=row["document_count"],
                 message_count=row["message_count"],
@@ -271,6 +300,39 @@ async def list_sessions(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to list sessions: {str(e)}",
+        )
+
+
+@app.patch("/sessions/{session_id}/rename", response_model=RenameSessionResponse)
+async def rename_session(
+    session_id: str,
+    req: RenameSessionRequest,
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user),
+) -> RenameSessionResponse:
+    try:
+        session_obj = session_service.rename_session(
+            db,
+            session_id,
+            req.display_name,
+            user_id=current_user.id,
+        )
+        db.commit()
+
+        return RenameSessionResponse(
+            session_id=session_obj.session_id,
+            display_name=session_obj.display_name or session_obj.session_id,
+        )
+    except DocumentPortalException as e:
+        db.rollback()
+        detail = str(e)
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to rename session: {str(e)}",
         )
 
 @app.get("/sessions/{session_id}/documents", response_model=list[DocumentResponse])

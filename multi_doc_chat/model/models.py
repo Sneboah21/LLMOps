@@ -49,11 +49,21 @@ class ChatMessageResponse(BaseModel):
 
 class SessionSummaryResponse(BaseModel):
     session_id: str
+    display_name: str
     created_at: datetime
     document_count: int
     message_count: int
     backend: Optional[str] = None
     is_active: bool
+
+
+class RenameSessionRequest(BaseModel):
+    display_name: Annotated[str, Field(min_length=1, max_length=255)]
+
+
+class RenameSessionResponse(BaseModel):
+    session_id: str
+    display_name: str
 
 class RegisterRequest(BaseModel):
     email: EmailStr
